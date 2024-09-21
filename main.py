@@ -1,149 +1,183 @@
+import tkinter as tk
+from tkinter import messagebox, filedialog
 import cv2
 import numpy as np
-import time
-import easyocr
 
-# Path to the pre-trained Haar cascade for car detection and number plate detection
-car_cascade_src = '/Users/anand/Downloads/cars1.xml'  # Update this path if necessary
-plate_cascade_src = '/Users/anand/Downloads/haarcascade_russian_plate_number (1).xml'  # Update this path if necessary
-video_src = r'/Users/anand/Downloads/h1.mp4'  # Update this path if necessary
+# Load YOLO model
+net = cv2.dnn.readNet("/Users/anand/Downloads/yolov3.weights", "/Users/anand/Downloads/yolov3.cfg")
 
-# Initialize EasyOCR reader
-reader = easyocr.Reader(['en'])  # Add more languages if needed
+# Get the names of all layers in the network
+layer_names = net.getLayerNames()
+output_layers_indices = net.getUnconnectedOutLayers().flatten()
+output_layers = [layer_names[i - 1] for i in output_layers_indices]
 
-# Initialize car number for tracking
-car_count = 0
+# Load COCO class labels
+with open("/Users/anand/Downloads/coco.names", "r") as f:
+    classes = [line.strip() for line in f.readlines()]
 
-# Define color ranges in HSV (Hue, Saturation, Value)
-COLOR_RANGES = {
-    'Red': ([0, 100, 100], [10, 255, 255]),
-    'Green': ([40, 100, 100], [80, 255, 255]),
-    'Blue': ([100, 100, 100], [140, 255, 255]),
-    'Yellow': ([20, 100, 100], [35, 255, 255]),
-    'White': ([0, 0, 200], [180, 30, 255]),
-    'Black': ([0, 0, 0], [180, 255, 30]),
+# Predefined list of basic colors for detection
+COLORS = {
+    "Red": (255, 0, 0),
+    "Green": (0, 255, 0),
+    "Blue": (0, 0, 255),
+    "Yellow": (255, 255, 0),
+    "Cyan": (0, 255, 255),
+    "Magenta": (255, 0, 255),
+    "White": (255, 255, 255),
+    "Gray": (128, 128, 128),
+    "Black": (0, 0, 0)
 }
 
-def detect_color(hsv_roi):
-    color_found = "Unknown"
-    max_percentage = 0
-    for color_name, (lower_bound, upper_bound) in COLOR_RANGES.items():
-        lower_bound = np.array(lower_bound, dtype="uint8")
-        upper_bound = np.array(upper_bound, dtype="uint8")
-        mask = cv2.inRange(hsv_roi, lower_bound, upper_bound)
-        color_percentage = (cv2.countNonZero(mask) / (hsv_roi.size / 3)) * 100
-        if color_percentage > max_percentage:
-            max_percentage = color_percentage
-            color_found = color_name
-    return color_found if max_percentage > 20 else "Unknown"
+# Function to get color name from BGR value
+def get_color_name(bgr_color):
+    rgb_color = (bgr_color[2], bgr_color[1], bgr_color[0])
+    tolerance = 60
+    def within_tolerance(c1, c2):
+        return all(abs(c1[i] - c2[i]) <= tolerance for i in range(3))
+    if abs(rgb_color[0] - rgb_color[1]) < 20 and abs(rgb_color[1] - rgb_color[2]) < 20:
+        return "Gray"
+    closest_color_name = None
+    min_distance = float('inf')
+    for color_name, color_value in COLORS.items():
+        if within_tolerance(rgb_color, color_value):
+            distance = np.linalg.norm(np.array(rgb_color) - np.array(color_value))
+            if distance < min_distance:
+                min_distance = distance
+                closest_color_name = color_name
+    return closest_color_name if closest_color_name else "Unknown"
 
-def calculate_speed(pos1, pos2, time_diff, ppm):
-    """Calculate speed based on pixel movement and time difference."""
-    pixel_distance = np.sqrt((pos2[0] - pos1[0])**2 + (pos2[1] - pos1[1])**2)
-    meters = pixel_distance / ppm
-    speed = (meters / time_diff) * 3.6  # Convert m/s to km/h
-    return speed
+# Speed calculation helper function
+def calculate_speed(prev_frame, curr_frame, fps):
+    distance = np.linalg.norm(np.array(curr_frame) - np.array(prev_frame))
+    speed_mps = (distance * fps) / 30.0
+    speed_kmph = speed_mps * 3.6
+    return speed_kmph
 
-# Load the pre-trained Haar cascade for car detection and number plate detection
-car_cascade = cv2.CascadeClassifier(car_cascade_src)
-plate_cascade = cv2.CascadeClassifier(plate_cascade_src)
-
-# Capture video from the video source
-cap = cv2.VideoCapture(video_src)
-
-# Get video properties
-fps = cap.get(cv2.CAP_PROP_FPS)
-frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-# Assume 4 meters per 100 pixels (adjust as needed for your video)
-pixels_per_meter = 25
-
-# Dictionary to store car tracking info
-car_tracks = {}
-
-while True:
-    ret, frame = cap.read()
-    
-    if not ret:
-        break
-    
+# License plate detection using contours
+def detect_license_plate(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    cars = car_cascade.detectMultiScale(gray, 1.1, 3, minSize=(80, 80))
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    edged = cv2.Canny(blur, 100, 200)
     
-    current_time = time.time()
+    contours, _ = cv2.findContours(edged, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     
-    for (x, y, w, h) in cars:
-        car_center = (int(x + w / 2), int(y + h / 2))
+    license_plate = None
+    for contour in contours:
+        perimeter = cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
         
-        # Check if this car is already being tracked
-        tracked = False
-        tracked_id = None
-        for car_id, car_info in list(car_tracks.items()):
-            dist = np.sqrt((car_center[0] - car_info['center'][0])**2 + 
-                           (car_center[1] - car_info['center'][1])**2)
-            if dist < 50:  # Assume it's the same car if the center is within 50 pixels
-                tracked = True
-                tracked_id = car_id
-                if current_time - car_info['time'] > 0.1:  # Update every 0.1 seconds
-                    speed = calculate_speed(car_info['center'], car_center, 
-                                            current_time - car_info['time'], 
-                                            pixels_per_meter)
-                    car_tracks[car_id] = {
-                        'center': car_center,
-                        'time': current_time,
-                        'speed': speed
-                    }
+        if len(approx) == 4:
+            x, y, w, h = cv2.boundingRect(approx)
+            aspect_ratio = w / h
+            if 2 < aspect_ratio < 5:
+                license_plate = frame[y:y+h, x:x+w]
+                cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 0, 0), 2)
                 break
-        
-        if not tracked:
-            car_count += 1
-            tracked_id = car_count
-            car_tracks[tracked_id] = {
-                'center': car_center,
-                'time': current_time,
-                'speed': 0
-            }
-        
-        # Draw rectangle around the car
-        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 2)
-        
-        # Detect color
-        car_roi = frame[y:y + h, x:x + w]
-        hsv_roi = cv2.cvtColor(car_roi, cv2.COLOR_BGR2HSV)
-        detected_color = detect_color(hsv_roi)
-        
-        # Display color and speed information
-        cv2.putText(frame, f"Color: {detected_color}", (x, y - 35), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-        cv2.putText(frame, f"Speed: {car_tracks[tracked_id]['speed']:.2f} km/h", 
-                    (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-
-        # Detect the number plate
-        plate_roi = frame[y:y + h, x:x + w]
-        plate_gray = cv2.cvtColor(plate_roi, cv2.COLOR_BGR2GRAY)
-        plates = plate_cascade.detectMultiScale(plate_gray, 1.1, 3, minSize=(30, 10))
-        
-        for (px, py, pw, ph) in plates:
-            cv2.rectangle(frame, (x + px, y + py), (x + px + pw, y + py + ph), (0, 255, 0), 2)
-            # Crop and OCR the number plate
-            plate_image = plate_roi[py:py + ph, px:px + pw]
-            plate_text = reader.readtext(plate_image)
-            if plate_text:
-                # Extract the text from the result
-                plate_text_str = " ".join([text[1] for text in plate_text]).strip()
-                cv2.putText(frame, plate_text_str, (x + px, y + py - 10), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
-    # Slow down the video by adjusting the playback speed
-    time.sleep(1 / fps)
-
-    # Display the frame
-    cv2.imshow('Video', frame)
     
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+    return license_plate
 
-# Release resources
-cap.release()
-cv2.destroyAllWindows()
+# Placeholder function for character recognition
+def recognize_characters(license_plate_image):
+    # Implement character recognition here using a suitable model
+    return "ABC123"
+
+# Function to process a video file and detect vehicles (cars, trucks, motorbikes) and license plates
+def process_video(video_path):
+    cap = cv2.VideoCapture(video_path)
+    
+    if not cap.isOpened():
+        messagebox.showerror("Error", "Unable to open video file.")
+        return
+    
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    prev_frame_vehicle_positions = []
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        height, width, _ = frame.shape
+        
+        blob = cv2.dnn.blobFromImage(frame, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
+        net.setInput(blob)
+        outs = net.forward(output_layers)
+
+        vehicle_positions = []
+
+        for out in outs:
+            for detection in out:
+                scores = detection[5:]
+                class_id = np.argmax(scores)
+                confidence = scores[class_id]
+                if confidence > 0.5 and classes[class_id] in ["car", "motorbike", "truck"]:
+                    center_x = int(detection[0] * width)
+                    center_y = int(detection[1] * height)
+                    w = int(detection[2] * width)
+                    h = int(detection[3] * height)
+                    x = int(center_x - w / 2)
+                    y = int(center_y - h / 2)
+                    vehicle_positions.append((center_x, center_y))
+
+                    vehicle_type = classes[class_id]
+                    vehicle_roi = frame[y:y+h, x:x+w]
+                    avg_color = np.mean(vehicle_roi, axis=(0, 1)).astype(int)
+                    color_name = get_color_name(avg_color)
+
+                    cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                    cv2.putText(frame, f"{vehicle_type.capitalize()}, Color: {color_name}", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 2)
+
+                    license_plate = detect_license_plate(frame)
+                    if license_plate is not None:
+                        registration_number = recognize_characters(license_plate)
+                        cv2.putText(frame, f"Plate: {registration_number}", (x, y+h+20), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 2)
+
+        if prev_frame_vehicle_positions:
+            for i, curr_pos in enumerate(vehicle_positions):
+                if i < len(prev_frame_vehicle_positions):
+                    speed_kmph = calculate_speed(prev_frame_vehicle_positions[i], curr_pos, fps)
+                    cv2.putText(frame, f"Speed: {speed_kmph:.2f} km/h", (curr_pos[0], curr_pos[1]-30), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 2)
+
+        prev_frame_vehicle_positions = vehicle_positions
+
+        cv2.imshow("Vehicle Detection and License Plate Recognition", frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+# Tkinter GUI for uploading and processing the video
+def upload_video():
+    video_path = filedialog.askopenfilename(title="Select Video File", filetypes=[("MP4 files", "*.mp4"), ("All files", "*.*")])
+    if video_path:
+        process_video(video_path)
+
+# Enhanced Tkinter GUI
+def create_gui():
+    root = tk.Tk()
+    root.title("PAriVahaN - Vehicle Detection App")
+    root.geometry("500x400")
+    root.configure(bg="#2C3E50")
+
+    # Header label
+    header = tk.Label(root, text="Welcome to PAriVahaN", font=("Arial", 24, "bold"), fg="#ECF0F1", bg="#2C3E50")
+    header.pack(pady=20)
+
+    # Instruction label
+    instructions = tk.Label(root, text="Upload a video to detect vehicles, their speed, and license plates", font=("Arial", 14), fg="#ECF0F1", bg="#2C3E50")
+    instructions.pack(pady=10)
+
+    # Upload button with styling
+    upload_button = tk.Button(root, text="Upload Video", command=upload_video, font=("Arial", 16), bg="#3498DB", fg="#FFFFFF", width=20)
+    upload_button.pack(pady=20)
+
+    # Footer label
+    footer = tk.Label(root, text="Powered by PAriVahaN", font=("Arial", 12), fg="#BDC3C7", bg="#2C3E50")
+    footer.pack(side=tk.BOTTOM, pady=10)
+
+    root.mainloop()
+
+# Run the enhanced GUI
+create_gui()
