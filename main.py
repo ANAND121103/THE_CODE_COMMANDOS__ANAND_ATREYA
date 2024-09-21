@@ -125,18 +125,18 @@ def process_video(video_path):
                     color_name = get_color_name(avg_color)
 
                     cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                    cv2.putText(frame, f"{vehicle_type.capitalize()}, Color: {color_name}", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 2)
+                    cv2.putText(frame, f"{vehicle_type.capitalize()}, Color: {color_name}", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
                     license_plate = detect_license_plate(frame)
                     if license_plate is not None:
                         registration_number = recognize_characters(license_plate)
-                        cv2.putText(frame, f"Plate: {registration_number}", (x, y+h+20), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 2)
+                        cv2.putText(frame, f"Plate: {registration_number}", (x, y+h+20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
         if prev_frame_vehicle_positions:
             for i, curr_pos in enumerate(vehicle_positions):
                 if i < len(prev_frame_vehicle_positions):
                     speed_kmph = calculate_speed(prev_frame_vehicle_positions[i], curr_pos, fps)
-                    cv2.putText(frame, f"Speed: {speed_kmph:.2f} km/h", (curr_pos[0], curr_pos[1]-30), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 2)
+                    cv2.putText(frame, f"Speed: {speed_kmph:.2f} km/h", (curr_pos[0], curr_pos[1]-30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
         prev_frame_vehicle_positions = vehicle_positions
 
